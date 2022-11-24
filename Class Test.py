@@ -12,153 +12,114 @@ This is a temporary script file.
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+import matplotlib.pyplot as plt
+from datetime import datetime
+import seaborn as sns
 
 # %% Long Position Class.
 
 class Long():
     
-    def __init__(self, size, lim_buy=0, tp=0, sl=0):
+    def __init__(self, id, size, sl=0):
         
+        self.id = id
         self.status = 0
         self.size = size
-        self.lim_buy = lim_buy
-        self.tp = tp
+        self.value = 0.0
         self.sl = sl
         
         return None
     
-    def check(self, open, high, low, close, maker_fee, taker_fee):
-        '''
-        Every tick check longs for satisfaction of entry and exit orders,
-        excluding market sell orders.
-
-        Parameters
-        ----------
-        open : TYPE
-            DESCRIPTION.
-        high : TYPE
-            DESCRIPTION.
-        low : TYPE
-            DESCRIPTION.
-        close : TYPE
-            DESCRIPTION.
-
-        Returns
-        -------
-        TYPE
-            DESCRIPTION.
-
-        '''
+    def check(self, timestamp, open, high, low, close):
         
-        # Long entry. #
+        # Entry. #
+        
+        # Market buy.
         
         if (self.status == 0):
             
-            # Market buy.
-                
-            if (self.lim_buy == 0):
-                
-                self.status += 1
-                
-                # Return cost of purchase, assuming purchase at open.
-                
-                return -(1 + taker_fee) * self.size * open
+            self.status = 1
+            self.entry_price = open
+            self.entry_time = timestamp
+            self.orig_value = self.size * open
+            self.value = self.orig_value
             
-            # Limit buy.
+            # Return cost of purchase, at bar open.
             
-            elif (self.lim_buy != 0 and low <= self.lim_buy):
-                
-                self.status += 1
-                
-                # Return cost of purchase, assuming zero slippage.
-                
-                return -(1 + maker_fee) * self.size * self.lim_buy
+            print("{} #{} Long Open: {} market buy at {} for {}." \
+                  "".format(timestamp,
+                            self.id,
+                            self.size,
+                            open,
+                            self.orig_value)
+                  )
             
-            # Limit fails.
-            
-            else:
-                
-                return 0
-            
-        # Planned long exit. #
+            return -self.orig_value
+        
+        # Position open. #
         
         elif (self.status == 1):
             
+            # Update price-to-market position value.
+            
+            self.value = self.size*close
+            
             # Stop loss.
             
-            if (self.sl != 0 and low <= self.sl):
+            if (low <= self.sl):
                 
-                self.status += 1
+                # Convert stop loss to market sell at next bar open.
                 
-                # Return proceeds of sale, assuming zero slippage.
+                print("{} # {} Long SL Hit: converting to market sell." \
+                      "".format(timestamp,
+                                self.id)
+                      )
                 
-                return (1 + taker_fee) * self.size * self.sl
-            
-            # Take profit.
-            
-            elif (self.tp != 0 and high >= self.tp):
+                self.status = 2
                 
-                self.status += 1
-                
-                # Return proceeds of sale, assuming zero slipage.
-                
-                return (1 + maker_fee) * self.size * self.tp
-            
-            # Neither stop loss or take profit satisfied.
+                return 0.0
             
             else:
                 
-                return 0
+                return 0.0
             
-        # Long closed. #
+            return 0.0
+        
+        # Market sell.
+        
+        elif (self.status == 2):
+            
+            self.status = 3
+            self.exit_price = open
+            self.exit_time = timestamp
+            self.final_value = self.size * open
+            self.value = 0.0
+            
+            # Return proceeds of sale, at bar open.
+            
+            print("{} #{} Long Close: {} market sell at {} for {}." \
+                  "".format(timestamp,
+                            self.id,
+                            self.size, 
+                            open, 
+                            self.final_value)
+                  )
+            
+            return self.final_value
         
         else:
             
-            return 0
+            return 0.0
         
-    def sell(self, open, taker_fee):
-        '''
-        Market sell order at open of current tick. Assumes sale at open price
-        with zero slippage.
-
-        Parameters
-        ----------
-        open : TYPE
-            DESCRIPTION.
-
-        Returns
-        -------
-        TYPE
-            DESCRIPTION.
-
-        '''
+    # Market sell order.
+    
+    def sell(self):
         
-        # Long open.
+        self.status = 2
         
-        if (self.status == 1):
+        return None
             
-            self.status += 1
-            
-            # Return proceeds of sale, assuming sale at open.
-            
-            return (1 + taker_fee) * self.size * open
         
-        # Long not entered or closed.
-        
-        else:
-            
-            return 0
-        
-    # Modify Long properties. #
-            
-    def mod_lim_buy(self, lim_buy):
-        self.lim_buy = lim_buy
-        
-    def mod_tp(self, tp):
-        self.tp = tp
-        
-    def mod_sl(self, sl):
-        self.sl = sl
                 
  
 # %% Test Dataset.
@@ -167,23 +128,62 @@ class Long():
 
 csv1 = pd.read_csv(r'E:\Google Drive\Python\Quantitative Finance\ADX Flash BB Analysis FXCM\EURUSD_m1_Y1_BidAndAsk.csv')
                    
-#  Transform FXCM HDD Basic Price Series to OHLC.
+# %% Transform FXCM HDD Basic Price Series to Bid OHLCV.
 
-def transform_data(df):
+def fxcm_bid(df):
+    '''
+    Transforms raw FXCM HDD Basic Historical price series to a simple six 
+    column bid price series. Columns: timestamp, open, high, low, close, vol.
+    
+    Dependencies: datetime, pandas.
+
+    Parameters
+    ----------
+    df : pandas DataFrame
+        Raw FXCM HDD Basic .csv read into a pandas DataFrame. Any timeframe.
+
+    Returns
+    -------
+    df : pandas DataFrame
+        Six column bid price series, see function description. 'timestamp' is
+        a datetime54[ns] object.
+
+    '''
     
     df = df.copy()
     
-    # Combine Date and Time, then drop Date.
-    df['time'] = df['Date'] + " " + df['Time']
-    df = df.iloc[:,1:]
+    # Combine Date and Time into datetime 'timestamp'.
     
-    # Rename Bid OHLC to OHLC
+    df['timestamp'] = None
+    
+    for row in tqdm(df.itertuples()):
+
+        df.at[row.Index, 'timestamp'] = datetime(int(row.Date[6:10]),
+                                                 int(row.Date[0:2]),
+                                                 int(row.Date[3:5]),
+                                                 int(row.Time[0:2]),
+                                                 int(row.Time[3:5]),
+                                                 int(row.Time[6:8])
+                                                 )
+        
+    df['timestamp'] = pd.to_datetime(df['timestamp'], 
+                                     format='%Y-%m-%d %H:%M:%S')
+        
+    
+    
+    # Rename Bid OHLC to 'OHLC'.
+    
     df['open'] = df['OpenBid']
     df['high'] = df['HighBid']
     df['low'] = df['LowBid']
     df['close'] = df['CloseBid']
     
-    # Drop Bid and Ask OHLC and rename Total Ticks to Volume.
+    # Rename Total Ticks to 'vol' and move to end.
+    
+    df['vol'] = df['Total Ticks']
+    
+    # Drop Bid OHLC, Ask OHLC, Date, Time and Total Ticks.
+    
     df = df.drop(columns = ['OpenBid', 
                             'HighBid', 
                             'LowBid', 
@@ -191,14 +191,17 @@ def transform_data(df):
                             'OpenAsk', 
                             'HighAsk', 
                             'LowAsk', 
-                            'CloseAsk'
+                            'CloseAsk',
+                            'Total Ticks',
+                            'Date',
+                            'Time'
                             ])
-    
-    df = df.rename(columns = {'Total Ticks': 'vol'})    
     
     return df            
  
-# %% Mock engine for testing.
+# %% Independent strategy functions.
+
+# Fast/Slow Moving Averages Technical Indicator.
 
 def ta_ma(df, fast, slow):
     
@@ -209,77 +212,173 @@ def ta_ma(df, fast, slow):
     
     df['ma_temp'] = np.where(df.fast_ma > df.slow_ma, 1, 0)
     df['ma_signal'] = df.ma_temp.diff()
+    df['ma_long'] = np.where(df.ma_signal == 1, True, False)
+    df['ma_short'] = np.where(df.ma_signal == -1, True, False)
     
-    df = df.drop(columns=['ma_temp'])
+    df = df.drop(columns=['ma_temp', 'ma_signal'])
     
     return df
 
+# Moving Averages Strategy Logic.
 
+def ma_strategy_long_entry(row):
+    
+    if (row.ma_long == True):
+        
+        sl = row.close - 0.001
+        
+        return True
+    
+    else:
+        
+        return False
+    
+def ma_strategy_long_exit(row):
+    
+    if (row.ma_short == True):
+        
+        return True
+    
+    else:
+        
+        return False
+    
+
+
+# %% Plot Price Series and Equity Curve.
+
+def ma_plot(df):
+    
+    # Price series.
+    
+    #fig, ax1, ax2 = plt.subplots(figsize=(15,5))
+    
+    fig = plt.figure(figsize=(15,15))
+    
+    #ax = fig.add_subplot(111)
+   # ax1.set_xlabel('Timestamp', fontsize=10)
+
+    
+
+    
+    # Bid close and on-chart studies.
+    
+    ax1 = fig.add_subplot(311)
+    
+    ax1.plot(df.timestamp, df.close, 'b')
+    ax1.plot(df.timestamp, df.fast_ma, 'r')
+    ax1.plot(df.timestamp, df.slow_ma, 'g')
+
+    #ax1.ylabel('Bid Close', fontsize=10)
+    
+    # Strategy. #
+    
+    # Position tracker.
+    
+    ax2 = fig.add_subplot(312)
+    
+    ax2.plot(df.timestamp, df.open_longs, 'b')
+    ax2.plot(df.timestamp, df.closed_longs, 'r')
+    
+    #ax2.ylabel('Positions', fontsize=10)
+    
+    # Cash and Account Value.
+    
+    ax3 = fig.add_subplot(313)
+    
+    ax3.plot(df.timestamp, df.cash, 'b')
+    ax3.plot(df.timestamp, df.positions_value, 'r')
+    ax3.plot(df.timestamp, df.account, 'g')
+    
+
+    plt.tight_layout()
+    plt.show()
+    
+    return None
+
+# %% Basic Backtest Engine.
 
 def backtest(df):
     
     df = df.copy()
     
-    cash = 100000.0
-    df['cash'] = 0.0
-    df['longs'] = 0
+    position_no = 1
+    fee = 0.001
+    cash = 1000000.00
+    margin = 30
+    margin_debt = 0.0
+    restricted_cash = 0.0
+
+    
+    df['cash'] = cash
+    df['restricted_cash'] = restricted_cash
+    df['margin_debt'] = margin_debt
+    df['open_longs'] = 0
+    df['closed_longs'] = 0
+    
     
     open_longs = []
     closed_longs = []
     
-    for tick in tqdm(df.itertuples()):
+    for row in tqdm(df.itertuples()):
         
-        # Check open longs for exit satisfaction.
-        
+        # Iterate through open positions. #
         
         for long in reversed(open_longs):
             
-            pnl = Long.check(self=long,
-                               open=tick.open,
-                               high=tick.high,
-                               low=tick.low,
-                               close=tick.close,
-                               maker_fee=0.0,
-                               taker_fee=0.0
-                               )
+            transfer = long.check(row.timestamp, 
+                                  row.open,
+                                  row.high,
+                                  row.low,
+                                  row.close
+                                  )
             
-            cash += pnl
+            margin_debt += transfer - fee * abs(transfer)
             
-            # Remove closed long from 
+
             
-            if (long.status == 2):
+            if (long.status == 3):
                 
-                closed_longs.append(
-                    open_longs.pop(
-                        open_longs.index(long)))
+                closed_longs.append(open_longs.pop(open_longs.index(long)))
                 
             else:
                 
                 None
-         
-        # Check long entry conditions.
+                
+        # Open position. #
         
-        if (tick.ma_signal == 1):
+        # Open long position.
+        
+        if (ma_strategy_long_entry(row) == True):
             
-            new_long_tp = tick.close * 1.005
-            new_long_sl = tick.close * 0.99
-            new_long_lim_buy = tick.close * 0.995
+            size = (row.cash / row.close)*0.95
+            new_long = Long(position_no, size)
+            position_no += 1
             
-            new_long = Long(100, lim_buy = new_long_lim_buy,
-                            tp=new_long_tp, sl=new_long_sl)
             open_longs.append(new_long)
             
-        else:
+        # Close position. #
             
-            None
-            
-        # Update series analytics.
+        # Close long position.
         
-        df.at[tick.Index, 'cash'] = cash
-        df.at[tick.Index, 'longs'] = len(open_longs)
+        if (len(open_longs) != 0):
             
-    return df
-
+            if (ma_strategy_long_exit(row) == True):
+            
+                for long in open_longs:
+                    
+                    long.sell()
+                    
+        # Update strategy analytics.
+        
+        df.at[row.Index, 'cash'] = cash
+        df.at[row.Index, 'open_longs'] = len(open_longs)
+        df.at[row.Index, 'closed_longs'] = len(closed_longs)
+        
+    return df, open_longs, closed_longs
+            
+             
+        
 
 
 
